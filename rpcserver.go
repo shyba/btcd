@@ -29,8 +29,9 @@ import (
 
 	"github.com/btcsuite/btcd/blockchain"
 	"github.com/btcsuite/btcd/blockchain/indexers"
-	"github.com/btcsuite/btcd/btcec"
+	"github.com/btcsuite/btcd/btcec/v2/ecdsa"
 	"github.com/btcsuite/btcd/btcjson"
+	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
 	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/database"
@@ -40,7 +41,6 @@ import (
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/txscript"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
 	"github.com/btcsuite/websocket"
 )
 
@@ -1250,11 +1250,17 @@ func handleGetBlockChainInfo(s *rpcServer, cmd interface{}, closeChan <-chan str
 		case chaincfg.DeploymentTestDummy:
 			forkName = "dummy"
 
+		case chaincfg.DeploymentTestDummyMinActivation:
+			forkName = "dummy-min-activation"
+
 		case chaincfg.DeploymentCSV:
 			forkName = "csv"
 
 		case chaincfg.DeploymentSegwit:
 			forkName = "segwit"
+
+		case chaincfg.DeploymentTaproot:
+			forkName = "taproot"
 
 		default:
 			return nil, &btcjson.RPCError{
@@ -1286,11 +1292,19 @@ func handleGetBlockChainInfo(s *rpcServer, cmd interface{}, closeChan <-chan str
 
 		// Finally, populate the soft-fork description with all the
 		// information gathered above.
+		var startTime, endTime int64
+		if starter, ok := deploymentDetails.DeploymentStarter.(*chaincfg.MedianTimeDeploymentStarter); ok {
+			startTime = starter.StartTime().Unix()
+		}
+		if ender, ok := deploymentDetails.DeploymentEnder.(*chaincfg.MedianTimeDeploymentEnder); ok {
+			endTime = ender.EndTime().Unix()
+		}
 		chainInfo.SoftForks.Bip9SoftForks[forkName] = &btcjson.Bip9SoftForkDescription{
-			Status:     strings.ToLower(statusString),
-			Bit:        deploymentDetails.BitNumber,
-			StartTime2: int64(deploymentDetails.StartTime),
-			Timeout:    int64(deploymentDetails.ExpireTime),
+			Status:              strings.ToLower(statusString),
+			Bit:                 deploymentDetails.BitNumber,
+			StartTime2:          startTime,
+			Timeout:             endTime,
+			MinActivationHeight: int32(deploymentDetails.MinActivationHeight),
 		}
 	}
 
@@ -2352,11 +2366,11 @@ func handleGetMiningInfo(s *rpcServer, cmd interface{}, closeChan <-chan struct{
 	if err != nil {
 		return nil, err
 	}
-	networkHashesPerSec, ok := networkHashesPerSecIface.(int64)
+	networkHashesPerSec, ok := networkHashesPerSecIface.(float64)
 	if !ok {
 		return nil, &btcjson.RPCError{
 			Code:    btcjson.ErrRPCInternal.Code,
-			Message: "networkHashesPerSec is not an int64",
+			Message: "networkHashesPerSec is not a float64",
 		}
 	}
 
@@ -2370,7 +2384,7 @@ func handleGetMiningInfo(s *rpcServer, cmd interface{}, closeChan <-chan struct{
 		Generate:           s.cfg.CPUMiner.IsMining(),
 		GenProcLimit:       s.cfg.CPUMiner.NumWorkers(),
 		HashesPerSec:       s.cfg.CPUMiner.HashesPerSecond(),
-		NetworkHashPS:      float64(networkHashesPerSec),
+		NetworkHashPS:      networkHashesPerSec,
 		PooledTx:           uint64(s.cfg.TxMemPool.Count()),
 		TestNet:            cfg.TestNet3,
 	}
@@ -2390,8 +2404,8 @@ func handleGetNetTotals(s *rpcServer, cmd interface{}, closeChan <-chan struct{}
 
 // handleGetNetworkHashPS implements the getnetworkhashps command.
 func handleGetNetworkHashPS(s *rpcServer, cmd interface{}, closeChan <-chan struct{}) (interface{}, error) {
-	// Note: All valid error return paths should return an int64.
-	// Literal zeros are inferred as int, and won't coerce to int64
+	// Note: All valid error return paths should return a float64.
+	// Literal zeros are inferred as int, and won't coerce to float64
 	// because the return value is an interface{}.
 
 	c := cmd.(*btcjson.GetNetworkHashPSCmd)
@@ -2406,7 +2420,7 @@ func handleGetNetworkHashPS(s *rpcServer, cmd interface{}, closeChan <-chan stru
 		endHeight = int32(*c.Height)
 	}
 	if endHeight > best.Height || endHeight == 0 {
-		return int64(0), nil
+		return float64(0), nil
 	}
 	if endHeight < 0 {
 		endHeight = best.Height
@@ -2473,13 +2487,13 @@ func handleGetNetworkHashPS(s *rpcServer, cmd interface{}, closeChan <-chan stru
 	// Calculate the difference in seconds between the min and max block
 	// timestamps and avoid division by zero in the case where there is no
 	// time difference.
-	timeDiff := int64(maxTimestamp.Sub(minTimestamp) / time.Second)
+	timeDiff := maxTimestamp.Sub(minTimestamp).Seconds()
 	if timeDiff == 0 {
-		return int64(0), nil
+		return timeDiff, nil
 	}
 
-	hashesPerSec := new(big.Int).Div(totalWork, big.NewInt(timeDiff))
-	return hashesPerSec.Int64(), nil
+	hashesPerSec, _ := new(big.Float).Quo(new(big.Float).SetInt(totalWork), new(big.Float).SetFloat64(timeDiff)).Float64()
+	return hashesPerSec, nil
 }
 
 // handleGetNodeAddresses implements the getnodeaddresses command.
@@ -2507,7 +2521,7 @@ func handleGetNodeAddresses(s *rpcServer, cmd interface{}, closeChan <-chan stru
 		address := &btcjson.GetNodeAddressesResult{
 			Time:     node.Timestamp.Unix(),
 			Services: uint64(node.Services),
-			Address:  node.IP.String(),
+			Address:  node.Addr.String(),
 			Port:     node.Port,
 		}
 		addresses = append(addresses, address)
@@ -3509,7 +3523,7 @@ func handleSignMessageWithPrivKey(s *rpcServer, cmd interface{}, closeChan <-cha
 	wire.WriteVarString(&buf, 0, c.Message)
 	messageHash := chainhash.DoubleHashB(buf.Bytes())
 
-	sig, err := btcec.SignCompact(btcec.S256(), wif.PrivKey,
+	sig, err := ecdsa.SignCompact(wif.PrivKey,
 		messageHash, wif.CompressPubKey)
 	if err != nil {
 		return nil, &btcjson.RPCError{
@@ -3704,7 +3718,7 @@ func handleVerifyMessage(s *rpcServer, cmd interface{}, closeChan <-chan struct{
 	wire.WriteVarString(&buf, 0, messageSignatureHeader)
 	wire.WriteVarString(&buf, 0, c.Message)
 	expectedMessageHash := chainhash.DoubleHashB(buf.Bytes())
-	pk, wasCompressed, err := btcec.RecoverCompact(btcec.S256(), sig,
+	pk, wasCompressed, err := ecdsa.RecoverCompact(sig,
 		expectedMessageHash)
 	if err != nil {
 		// Mirror Bitcoin Core behavior, which treats error in
@@ -4513,7 +4527,7 @@ type rpcserverConnManager interface {
 
 	// NodeAddresses returns an array consisting node addresses which can
 	// potentially be used to find new nodes in the network.
-	NodeAddresses() []*wire.NetAddress
+	NodeAddresses() []*wire.NetAddressV2
 }
 
 // rpcserverSyncManager represents a sync manager for use with the RPC server.

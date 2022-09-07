@@ -13,7 +13,7 @@ import (
 	"github.com/btcsuite/btcd/netsync"
 	"github.com/btcsuite/btcd/peer"
 	"github.com/btcsuite/btcd/wire"
-	"github.com/btcsuite/btcutil"
+	"github.com/btcsuite/btcd/btcutil"
 )
 
 // rpcPeer provides a peer for use with the RPC server and implements the
@@ -228,7 +228,7 @@ func (cm *rpcConnManager) RelayTransactions(txns []*mempool.TxDesc) {
 //
 // This function is safe for concurrent access and is part of the
 // rpcserverConnManager interface implementation.
-func (cm *rpcConnManager) NodeAddresses() []*wire.NetAddress {
+func (cm *rpcConnManager) NodeAddresses() []*wire.NetAddressV2 {
 	return cm.server.addrManager.AddressCache()
 }
 
